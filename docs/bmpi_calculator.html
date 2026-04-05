@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<!-- Google Analytics 4 — replace G-XXXXXXXXXX with your Measurement ID -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-XXXXXXXXXX', {
+    page_title: 'BMPI Calculator',
+    page_location: window.location.href,
+  });
+  function track(name, params) {
+    try { gtag('event', name, params || {}); } catch(e) {}
+  }
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>BMPI Calculator — Bitcoin Media Pressure Index</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap');
+:root{--bg:#080b12;--bg2:#0e1420;--bg3:#141c2e;--border:rgba(255,255,255,0.07);--accent:#f0a500;--accent2:#00c9a7;--text:#e2e8f0;--muted:#64748b;--danger:#ef4444;--warn:#f97316;--ok:#22c55e;--mono:'Space Mono',monospace;--sans:'DM Sans',sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh}
+body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(240,165,0,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(240,165,0,0.03) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0}
+.wrap{position:relative;z-index:1;max-width:760px;margin:0 auto;padding:48px 24px 80px}
+.hdr{margin-bottom:48px;border-left:3px solid var(--accent);padding-left:20px}
+.hdr-tag{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spacing:3px;text-transform:uppercase;margin-bottom:8px}
+.hdr h1{font-size:28px;font-weight:300;letter-spacing:-0.5px;line-height:1.2}
+.hdr h1 span{color:var(--accent);font-weight:500}
+.hdr-sub{margin-top:10px;font-size:13px;color:var(--muted);line-height:1.6}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:28px;margin-bottom:20px}
+.card-title{font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-bottom:20px;display:flex;align-items:center;gap:8px}
+.card-title::after{content:'';flex:1;height:1px;background:var(--border)}
+.date-row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+.field{flex:1;min-width:180px}
+.field label{display:block;font-size:11px;color:var(--muted);margin-bottom:6px;font-family:var(--mono);letter-spacing:1px}
+.field input[type="date"]{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--mono);font-size:15px;padding:12px 14px;outline:none;transition:border-color .2s;color-scheme:dark}
+.field input[type="date"]:focus{border-color:var(--accent)}
+.presets{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+.preset-btn{background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--muted);font-family:var(--mono);font-size:11px;padding:7px 14px;cursor:pointer;transition:all .15s;letter-spacing:1px}
+.preset-btn:hover{border-color:var(--accent);color:var(--accent)}
+.preset-btn.active{background:rgba(240,165,0,0.1);border-color:var(--accent);color:var(--accent)}
+.btn-calc{background:var(--accent);color:#000;border:none;border-radius:8px;font-family:var(--mono);font-size:13px;font-weight:700;letter-spacing:1px;padding:13px 28px;cursor:pointer;transition:all .15s;white-space:nowrap;align-self:flex-end}
+.btn-calc:hover{background:#ffc025;transform:translateY(-1px)}
+.btn-calc:disabled{background:var(--bg3);color:var(--muted);cursor:not-allowed;transform:none}
+.progress{display:none;margin-top:20px}
+.progress.show{display:block}
+.prog-line{display:flex;align-items:center;gap:10px;padding:6px 0;font-family:var(--mono);font-size:12px;color:var(--muted);border-bottom:1px solid rgba(255,255,255,0.03)}
+.prog-line.active{color:var(--accent)}
+.prog-line.done{color:var(--ok)}
+.prog-line.error{color:var(--danger)}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}
+.spinner{width:12px;height:12px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+.result{display:none}
+.result.show{display:block}
+.bmpi-display{display:flex;align-items:center;gap:24px;padding:24px;background:var(--bg3);border-radius:10px;margin-bottom:20px;flex-wrap:wrap}
+.bmpi-value{font-family:var(--mono);font-size:52px;font-weight:700;line-height:1;min-width:140px}
+.bmpi-meta{flex:1}
+.bmpi-date{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:2px;margin-bottom:6px}
+.bmpi-zone{font-size:20px;font-weight:500;margin-bottom:6px}
+.bmpi-desc{font-size:13px;color:var(--muted);line-height:1.5}
+.zone-calm{color:var(--ok)}
+.zone-normal{color:var(--accent2)}
+.zone-elevated{color:var(--accent)}
+.zone-alert{color:var(--warn)}
+.zone-manip{color:var(--danger)}
+.gauge-wrap{margin-bottom:20px}
+.gauge-labels{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:6px}
+.gauge-track{height:8px;background:var(--bg3);border-radius:4px;overflow:hidden;position:relative}
+.gauge-fill{height:100%;border-radius:4px;transition:width .8s cubic-bezier(.4,0,.2,1);background:linear-gradient(90deg,var(--ok),var(--accent2),var(--accent),var(--warn),var(--danger));width:0%}
+.gauge-pointer{position:absolute;top:-3px;width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid var(--bg);transform:translateX(-50%);transition:left .8s cubic-bezier(.4,0,.2,1);box-shadow:0 0 8px rgba(255,255,255,.4)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:20px}
+.stat{background:var(--bg3);border-radius:8px;padding:14px}
+.stat-label{font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:6px}
+.stat-val{font-family:var(--mono);font-size:18px;font-weight:700;color:var(--text)}
+.pct-row{display:flex;align-items:center;gap:12px;padding:14px;background:var(--bg3);border-radius:8px;margin-bottom:20px}
+.pct-label{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap}
+.pct-bar-track{flex:1;height:4px;background:rgba(255,255,255,.08);border-radius:2px}
+.pct-bar-fill{height:100%;border-radius:2px;background:var(--accent);transition:width .8s}
+.pct-val{font-family:var(--mono);font-size:13px;color:var(--accent);white-space:nowrap}
+.formula{background:var(--bg3);border-radius:8px;padding:16px;font-family:var(--mono);font-size:12px;color:var(--muted);line-height:1.8}
+.formula span{color:var(--accent2)}
+.error-box{display:none;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:16px;color:var(--danger);font-family:var(--mono);font-size:12px;line-height:1.6;margin-top:16px}
+.error-box.show{display:block}
+.note{font-size:12px;color:var(--muted);line-height:1.7;padding:16px;background:rgba(255,255,255,.02);border-radius:8px;border-left:2px solid var(--border)}
+.note a{color:var(--accent2);text-decoration:none}
+.how{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.how-step{padding:16px;background:var(--bg3);border-radius:8px;border-top:2px solid var(--border)}
+.how-step.s1{border-color:var(--accent)}
+.how-step.s2{border-color:var(--accent2)}
+.how-step.s3{border-color:var(--ok)}
+.how-step.s4{border-color:var(--muted)}
+.how-n{font-family:var(--mono);font-size:22px;font-weight:700;margin-bottom:6px;opacity:.4}
+.how-t{font-size:13px;font-weight:500;margin-bottom:4px}
+.how-d{font-size:11px;color:var(--muted);line-height:1.5}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hdr">
+    <div class="hdr-tag">Research Tool · v3.0</div>
+    <h1>Bitcoin Media Pressure<br><span>Index Calculator</span></h1>
+    <p class="hdr-sub">Computes the BMPI score for any date using GDELT Doc API v2. No file downloads required — live query, instant result.<br>Based on: Parfenovich (2026). Master's thesis, PJAIT Warsaw.</p>
+  </header>
+
+  <div class="card">
+    <div class="card-title">How it works</div>
+    <div class="how">
+      <div class="how-step s1"><div class="how-n">01</div><div class="how-t">Select date</div><div class="how-d">Any date from 2015 to yesterday</div></div>
+      <div class="how-step s2"><div class="how-n">02</div><div class="how-t">Query GDELT API</div><div class="how-d">Live search of Bitcoin articles via GDELT Doc API v2</div></div>
+      <div class="how-step s3"><div class="how-n">03</div><div class="how-t">Aggregate</div><div class="how-d">Count mentions and compute average tone from results</div></div>
+      <div class="how-step s4"><div class="how-n">04</div><div class="how-t">Compute BMPI</div><div class="how-d">Apply calibrated formula → bounded [0,1] score</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Parameters</div>
+    <div class="date-row">
+      <div class="field">
+        <label>Date</label>
+        <input type="date" id="dateInput"/>
+      </div>
+      <button class="btn-calc" id="calcBtn" onclick="calculate()">COMPUTE BMPI</button>
+    </div>
+    <div style="margin-top:16px">
+      <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:1px;margin-bottom:8px;">FILTER PRESET</div>
+      <div class="presets">
+        <button class="preset-btn active" onclick="setPreset('balanced',this)">BALANCED</button>
+        <button class="preset-btn" onclick="setPreset('sensitive',this)">SENSITIVE</button>
+        <button class="preset-btn" onclick="setPreset('strong',this)">STRONG</button>
+      </div>
+    </div>
+    <div class="progress" id="progress">
+      <div class="prog-line" id="p1"><div class="dot"></div> Building GDELT API query...</div>
+      <div class="prog-line" id="p2"><div class="dot"></div> Fetching Bitcoin articles from GDELT...</div>
+      <div class="prog-line" id="p3"><div class="dot"></div> Aggregating mentions and tone...</div>
+      <div class="prog-line" id="p4"><div class="dot"></div> Computing BMPI formula...</div>
+    </div>
+    <div class="error-box" id="errorBox"></div>
+  </div>
+
+  <div class="result card" id="result">
+    <div class="card-title">Result</div>
+    <div class="bmpi-display">
+      <div class="bmpi-value" id="bmpiVal">—</div>
+      <div class="bmpi-meta">
+        <div class="bmpi-date" id="bmpiDate">—</div>
+        <div class="bmpi-zone" id="bmpiZone">—</div>
+        <div class="bmpi-desc" id="bmpiDesc">—</div>
+      </div>
+    </div>
+    <div class="gauge-wrap">
+      <div class="gauge-labels"><span>0.00 · Calm</span><span>0.47</span><span>0.53</span><span>0.59</span><span>0.65</span><span>1.00 · Manipulation</span></div>
+      <div class="gauge-track"><div class="gauge-fill" id="gaugeFill"></div><div class="gauge-pointer" id="gaugePtr"></div></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="stat-label">MENTIONS</div><div class="stat-val" id="statMentions">—</div></div>
+      <div class="stat"><div class="stat-label">AVG TONE</div><div class="stat-val" id="statTone">—</div></div>
+      <div class="stat"><div class="stat-label">Z-MENTIONS</div><div class="stat-val" id="statZ1">—</div></div>
+      <div class="stat"><div class="stat-label">Z-TONE</div><div class="stat-val" id="statZ2">—</div></div>
+      <div class="stat"><div class="stat-label">ARTICLES</div><div class="stat-val" id="statArticles">—</div></div>
+      <div class="stat"><div class="stat-label">PRESET</div><div class="stat-val" id="statPreset">—</div></div>
+    </div>
+    <div class="pct-row">
+      <div class="pct-label">HISTORICAL PERCENTILE</div>
+      <div class="pct-bar-track"><div class="pct-bar-fill" id="pctFill"></div></div>
+      <div class="pct-val" id="pctVal">—</div>
+    </div>
+    <div class="formula">
+      z₁ = clip[(mentions − <span>379.0</span>) / <span>305.8</span>, −3, 3]<br>
+      z₂ = clip[(tone − <span>−0.9121</span>) / <span>0.7139</span>, −3, 3]<br>
+      raw = 0.25·z₁ + 0.20·z₂<br>
+      <strong style="color:var(--accent)">BMPI = σ(raw) = 1 / (1 + e<sup>−raw</sup>)</strong>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong>Data source:</strong> <a href="https://www.gdeltproject.org" target="_blank">GDELT Project</a> Doc API v2 — live query, no files stored.<br>
+    <strong>Calibration:</strong> μ and σ estimated on 2,220 days (2015-09-09 – 2026-01-23), balanced preset.<br>
+    <strong>Citation:</strong> Parfenovich, D. (2026). Bitcoin Media Pressure Index. Master's thesis, PJAIT Warsaw.
+  </div>
+</div>
+
+<script>
+// ─── Calibration (from 2220-day dataset 2015–2026, balanced preset) ──────────
+const CALIB = { mu_wzm: 379.0, sd_wzm: 305.8, mu_tone: -0.9121, sd_tone: 0.7139 };
+const W1 = 0.25, W2 = 0.20;
+
+// Query strings per preset
+const QUERIES = {
+  balanced:  'bitcoin cryptocurrency',
+  sensitive: 'bitcoin OR cryptocurrency OR crypto OR blockchain',
+  strong:    'bitcoin',
+};
+
+const ZONES = [
+  [0.000, 0.470, 'CALM',         'zone-calm',    'Organic movement. Low manipulation risk.'],
+  [0.470, 0.530, 'NORMAL',       'zone-normal',  'Standard media activity. Monitor.'],
+  [0.530, 0.590, 'ELEVATED',     'zone-elevated','Increased narrative. Caution advised.'],
+  [0.590, 0.650, 'ALERT',        'zone-alert',   'High manipulation. Reversal risk ~55%.'],
+  [0.650, 1.001, 'MANIPULATION', 'zone-manip',   'Extreme noise (top 5% historical). Half-life ~2 days.'],
+];
+
+const PCT_BREAKS = [
+  [0.425,5],[0.426,10],[0.434,20],[0.438,25],[0.445,30],
+  [0.461,40],[0.478,50],[0.495,60],[0.516,70],[0.528,75],
+  [0.548,80],[0.571,85],[0.598,90],[0.648,95],[0.805,99],
+];
+
+let currentPreset = 'balanced';
+
+window.addEventListener('DOMContentLoaded', () => {
+  const d = new Date(); d.setDate(d.getDate()-1);
+  document.getElementById('dateInput').value = d.toISOString().slice(0,10);
+  document.getElementById('dateInput').max = d.toISOString().slice(0,10);
+  document.getElementById('dateInput').min = '2015-01-01';
+});
+
+function setPreset(p, btn) {
+  currentPreset = p;
+  document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  track('preset_select', { preset: btn.dataset.preset });
+}
+
+// ─── Progress helpers ─────────────────────────────────────────────────────────
+function stepActive(id) {
+  const el = document.getElementById(id);
+  el.className = 'prog-line active';
+  el.innerHTML = `<div class="spinner"></div> ${el.textContent.trim()}`;
+}
+function stepDone(id, msg) {
+  const el = document.getElementById(id);
+  el.className = 'prog-line done';
+  el.innerHTML = `<div class="dot"></div> ${msg} ✓`;
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+async function calculate() {
+  const dateVal = document.getElementById('dateInput').value;
+  if (!dateVal) { alert('Please select a date.'); return; }
+  // GA4 event
+  track('compute_bmpi', { preset: currentPreset, bmpi_date: dateVal });
+
+  document.getElementById('result').classList.remove('show');
+  document.getElementById('errorBox').classList.remove('show');
+  document.getElementById('progress').classList.add('show');
+  document.getElementById('calcBtn').disabled = true;
+  ['p1','p2','p3','p4'].forEach(id => {
+    const el = document.getElementById(id);
+    el.className = 'prog-line';
+    el.innerHTML = `<div class="dot"></div> ${el.textContent.trim().replace(' ✓','')}`;
+  });
+
+  try {
+    // Step 1: Build query
+    stepActive('p1');
+    const d      = dateVal.replace(/-/g,'');
+    const start  = d + '000000';
+    const end    = d + '235959';
+    const query  = encodeURIComponent(QUERIES[currentPreset]);
+    // GDELT Doc API v2 - simplified query
+    const apiUrl = `https://api.gdeltproject.org/api/v2/doc/doc?query=${query}+sourcelang:english&mode=artlist&maxrecords=250&startdatetime=${start}&enddatetime=${end}&format=json`;
+    console.log('API URL:', apiUrl);
+    stepDone('p1', `Query built for ${dateVal}`);
+
+    // Step 2 & 3: GDELT API — mentions from artlist, tone from timelinetone
+    stepActive('p2');
+
+    async function gFetch(url) {
+      const tries = [
+        url,
+        'https://corsproxy.io/?' + encodeURIComponent(url),
+        'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+      ];
+      for (const u of tries) {
+        try {
+          const r = await fetch(u, {signal: AbortSignal.timeout(12000)});
+          const txt = await r.text();
+          if (txt.trim()[0] === '{' || txt.trim()[0] === '[') return JSON.parse(txt);
+        } catch(e) { /* try next */ }
+      }
+      return null;
+    }
+
+    // Request 1: article count (mentions)
+    const urlArt   = `https://api.gdeltproject.org/api/v2/doc/doc?query=${query}+sourcelang:english&mode=artlist&maxrecords=250&startdatetime=${start}&enddatetime=${end}&format=json`;
+    // Request 2: tone timeline — returns avgtone per time bucket
+    // mode=timelinetone gives: {"timeline":[{"date":"20260329120000","value":X},...]}
+    // where value IS the average tone
+    const urlTL    = `https://api.gdeltproject.org/api/v2/doc/doc?query=${query}+sourcelang:english&mode=timelinetone&startdatetime=${start}&enddatetime=${end}&format=json`;
+
+    console.log('artlist URL:', urlArt);
+    console.log('timelinetone URL:', urlTL);
+
+    const [dArt, dTL] = await Promise.all([gFetch(urlArt), gFetch(urlTL)]);
+
+    console.log('artlist keys:', dArt ? Object.keys(dArt) : 'null');
+    console.log('timelinetone keys:', dTL ? Object.keys(dTL) : 'null');
+    if (dTL) console.log('TL sample:', JSON.stringify(dTL).substring(0, 300));
+
+    const articles = dArt?.articles || [];
+    const mentions = articles.length;
+    stepDone('p2', `${mentions} articles retrieved`);
+
+    if (mentions === 0) {
+      throw new Error(`No articles found for ${dateVal} with ${currentPreset} preset. Try SENSITIVE preset.`);
+    }
+
+    // Step 3: extract tone from timelinetone API
+    // GDELT timelinetone actual format:
+    // {"timeline":[{"series":"Average Tone","data":[{"date":"...","value":-1.23},...]}]}
+    stepActive('p3');
+    let avgTone = 0;
+
+    if (dTL?.timeline?.length > 0) {
+      // Flatten all data points from all series
+      const allPoints = dTL.timeline.flatMap(series => series.data ?? []);
+      const vals = allPoints
+        .map(p => parseFloat(p.value ?? p.Value))
+        .filter(v => !isNaN(v) && isFinite(v));
+      if (vals.length > 0) {
+        avgTone = vals.reduce((a, b) => a + b, 0) / vals.length;
+        console.log(`Tone from timelinetone: ${vals.length} points, avg=${avgTone.toFixed(4)}`);
+      }
+    }
+    // Note: artlist articles don't include tone field in GDELT Doc API v2
+    console.log(`Final avgTone=${avgTone.toFixed(4)}`);
+
+    stepDone('p3', `mentions=${mentions}, avg_tone=${avgTone.toFixed(4)}`);
+
+    // Step 4: Compute BMPI
+    stepActive('p4');
+    const bmpi = computeBmpi(mentions, avgTone);
+    stepDone('p4', `BMPI = ${bmpi.score.toFixed(4)}`);
+
+    showResult(dateVal, mentions, avgTone, articles.length, bmpi);
+
+  } catch(e) {
+    track('bmpi_error', { error_message: String(e.message).substring(0, 150) });
+    const errBox = document.getElementById('errorBox');
+    errBox.textContent = '⚠ ' + e.message;
+    errBox.classList.add('show');
+  } finally {
+    document.getElementById('calcBtn').disabled = false;
+  }
+}
+
+// ─── BMPI formula ─────────────────────────────────────────────────────────────
+function computeBmpi(mentions, tone) {
+  const z1    = Math.max(-3, Math.min(3, (mentions - CALIB.mu_wzm) / CALIB.sd_wzm));
+  const z2    = Math.max(-3, Math.min(3, (tone    - CALIB.mu_tone) / CALIB.sd_tone));
+  const raw   = W1 * z1 + W2 * z2;
+  const score = 1 / (1 + Math.exp(-raw));
+  let zone = ZONES[ZONES.length-1];
+  for (const z of ZONES) { if (score >= z[0] && score < z[1]) { zone = z; break; } }
+  let pct = 99;
+  for (const [thr, p] of PCT_BREAKS) { if (score <= thr) { pct = p; break; } }
+  return { score, z1, z2, zone, pct };
+}
+
+// ─── Show result ──────────────────────────────────────────────────────────────
+function showResult(dateStr, mentions, tone, nArticles, bmpi) {
+  const { score, z1, z2, zone, pct } = bmpi;
+  document.getElementById('bmpiVal').textContent  = score.toFixed(4);
+  document.getElementById('bmpiVal').className    = 'bmpi-value ' + zone[3];
+  // GA4 result event
+  track('bmpi_result', {
+    bmpi_value: Math.round(bmpi * 1000) / 1000,
+    bmpi_zone: bmpi >= 0.70 ? 'MANIPULATION' : bmpi >= 0.60 ? 'ALERT' :
+               bmpi >= 0.53 ? 'ELEVATED' : bmpi >= 0.47 ? 'NORMAL' : 'CALM',
+    mentions: mentions,
+    result_date: dateStr,
+    preset: currentPreset,
+  });
+  document.getElementById('bmpiDate').textContent = dateStr + ' · GDELT Doc API v2';
+  document.getElementById('bmpiZone').textContent = zone[2];
+  document.getElementById('bmpiZone').className   = 'bmpi-zone ' + zone[3];
+  document.getElementById('bmpiDesc').textContent = zone[4];
+  const pct2 = score * 100;
+  document.getElementById('gaugeFill').style.width = pct2 + '%';
+  document.getElementById('gaugePtr').style.left   = pct2 + '%';
+  document.getElementById('statMentions').textContent = mentions.toLocaleString();
+  document.getElementById('statTone').textContent     = tone.toFixed(4);
+  document.getElementById('statZ1').textContent       = z1.toFixed(4);
+  document.getElementById('statZ2').textContent       = z2.toFixed(4);
+  document.getElementById('statArticles').textContent = nArticles.toLocaleString();
+  document.getElementById('statPreset').textContent   = currentPreset.toUpperCase();
+  const topPct = 100 - pct;
+  document.getElementById('pctFill').style.width = pct + '%';
+  document.getElementById('pctVal').textContent  = `top ${topPct}% (p${pct})`;
+  document.getElementById('result').classList.add('show');
+  document.getElementById('result').scrollIntoView({ behavior:'smooth', block:'start' });
+}
+</script>
+</body>
+</html>
