@@ -2,36 +2,57 @@
 """
 pipelines/step07_news_effect_model.py
 ========================================
-Ridge regression: quantify the media effect on BTC market cap residuals.
+BMPI v2: news effect model on abnormal BTC returns.
 
-What it does:
-  Uses resid_btc_mcap_usd from the SARIMAX baseline (step04) as the target.
-  Fits Ridge regression with GDELT media features to estimate the media
-  component of that residual on each day.
+What changed vs BMPI v1:
+- Target is abnormal BTC log-return from step04, not raw residual-level market cap.
+- Uses ALL days (including zero-news days) to avoid selection bias.
+- Uses only news features as explanatory variables because baseline market factors
+  were already removed in step04.
+- Applies feature filtering + Ridge regression with time-series cross-validation.
+- Produces daily predicted media-driven abnormal return and its USD approximation.
 
-  The output 'media_effect_usd' (= news_effect_usd) is used in step08–step16
-  to answer: "How many USD of BTC market cap movement per peak event
-  are attributable to media pressure?"
+Input:
+  data/processed/model_dataset_daily.parquet  (from step06)
 
-  Note: per-day R² is low (~0.01) by design — media explains a small fraction
-  of total daily residual noise. The meaningful metric is the window-level
-  ratio: sum_abs(media_effect) / sum_abs(resid) over ±30 day event windows
-  (paper: ~26.2% on average across 29 balanced-preset events).
+Expected key columns:
+  date
+  abnormal_btc_logret
+  btc_mcap
+  gdelt_* feature columns created in step06
 
-Input:  data/processed/model_dataset_daily.parquet  (from step06)
+Output:
+  data/processed/news_effect_daily.csv
+  data/processed/news_effect_summary.json
+  data/processed/news_effect_coefficients.csv
 
-Output: data/processed/news_effect_daily.csv
-        data/processed/news_effect_summary.json
-        data/processed/news_effect_coefficients.csv
+Key outputs:
+  predicted_media_abnormal_logret
+  predicted_media_effect_usd
+  bmip_v2_daily
+  bmip_v2_daily_abs
+  model_target
+  model_type
 
-Next step: step08_event_level_impact.py
+Notes:
+- predicted_media_abnormal_logret is the model-estimated media component
+  of abnormal BTC return for each day.
+- predicted_media_effect_usd is approximated as:
+      predicted_media_abnormal_logret * btc_mcap
+  which is acceptable as first-order approximation for daily moves.
+- abnormal return != media effect
+- predicted media effect is still model-based, not direct causality proof;
+  causal interpretation improves when combined with event study and OOS checks.
+
+Next step:
+  step08_event_level_impact.py
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -45,119 +66,259 @@ from sklearn.preprocessing import StandardScaler
 # Paths
 # ---------------------------------------------------------------------------
 
-BASE_DIR       = Path(__file__).resolve().parents[3]
+BASE_DIR = Path(__file__).resolve().parents[3]
 DATA_PROCESSED = BASE_DIR / "data" / "processed"
 
-MODEL_DATASET    = DATA_PROCESSED / "model_dataset_daily.parquet"
-OUT_PREDICTIONS  = DATA_PROCESSED / "news_effect_daily.csv"
-OUT_SUMMARY      = DATA_PROCESSED / "news_effect_summary.json"
+MODEL_DATASET = DATA_PROCESSED / "model_dataset_daily.parquet"
+OUT_PREDICTIONS = DATA_PROCESSED / "news_effect_daily.csv"
+OUT_SUMMARY = DATA_PROCESSED / "news_effect_summary.json"
 OUT_COEFFICIENTS = DATA_PROCESSED / "news_effect_coefficients.csv"
 
 # ---------------------------------------------------------------------------
-# Model settings
+# Config
 # ---------------------------------------------------------------------------
 
-# Target: log-space residual from SARIMAX baseline (step04)
-# Fitting in log space gives correct scale for media_effect
-# media_effect_usd = media_effect_log * btc_mcap (first-order approximation)
-TARGET_COL = "resid_log_btc_mcap"
+TARGET_COL = "abnormal_btc_logret"
+MCAP_COL_CANDIDATES = ["btc_mcap", "btc_kapitalizacja_usd"]
 
-CONTROL_COLS_CANDIDATES = [
-    "eth_mcap", "nasdaq_close", "dxy_close", "gold_close",
-    "log_eth_mcap", "log_nasdaq", "log_usd_idx", "log_gold",
-    "eth_kapitalizacja_usd", "nasdaq_zamkniecie",
-    "usd_indeks_szeroki", "zloto_zamkniecie_usd",
-]
+RIDGE_ALPHA = 10.0
+N_SPLITS = 5
 
-NEWS_COLS_CANDIDATES = [
-    "gdelt_mentions_all",
-    "gdelt_tone_all",
-    "gdelt_log_mentions_all",
-    "gdelt_tone_x_log_mentions_all",
-    "gdelt_log_mentions_all_lag1",
-    "gdelt_log_mentions_all_lag3",
-    "gdelt_log_mentions_all_lag7",
-    "gdelt_tone_all_lag1",
-    "gdelt_tone_all_lag3",
-    "gdelt_tone_all_lag7",
-    "gdelt_tone_x_log_mentions_all_lag1",
-    "gdelt_tone_x_log_mentions_all_lag3",
-    "gdelt_tone_x_log_mentions_all_lag7",
-    "gdelt_log_mentions_all_ma3",
-    "gdelt_log_mentions_all_ma7",
-    "gdelt_tone_all_ma3",
-    "gdelt_tone_all_ma7",
-    "gdelt_tone_x_log_mentions_all_ma3",
-    "gdelt_tone_x_log_mentions_all_ma7",
-]
-
-# alpha=1.0 selected via cross-validation (paper Section 3.3)
-RIDGE_ALPHA = 1.0
-N_SPLITS    = 5
-
+MIN_NON_NULL_RATIO = 0.80
+MAX_ABS_CORR = 0.97
+TOP_K_BY_ABS_CORR = 60
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def pick_cols(df: pd.DataFrame, candidates: List[str]) -> List[str]:
-    return [c for c in candidates if c in df.columns]
+
+def pick_first_existing(df: pd.DataFrame, candidates: List[str]) -> str | None:
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
 
 
-def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     return {
-        "MAE":  float(mean_absolute_error(y_true, y_pred)),
+        "MAE": float(mean_absolute_error(y_true, y_pred)),
         "RMSE": float(np.sqrt(mean_squared_error(y_true, y_pred))),
-        "R2":   float(r2_score(y_true, y_pred)),
+        "R2": float(r2_score(y_true, y_pred)),
     }
 
 
-def time_series_cv(X: pd.DataFrame, y: pd.Series,
-                   model: Pipeline, n_splits: int) -> dict:
+def get_news_feature_candidates(df: pd.DataFrame) -> List[str]:
+    """
+    Take only BMPI v2 news features from step06.
+    Exclude raw identifiers and obvious helper flags if needed.
+    """
+    exclude_exact = {
+        "date",
+        TARGET_COL,
+        "btc_price",
+        "btc_mcap",
+        "btc_logret",
+        "expected_btc_logret",
+        "abnormal_btc_logret_zscore_60d",
+        "abnormal_btc_return_pct",
+        "baseline_btc_mcap_hat_usd",
+        "abnormal_btc_mcap_usd",
+        "btc_return_pct",
+        "expected_btc_return_pct",
+        "weekday",
+        "month",
+        "is_weekend",
+        "abnormal_x_volatility",
+        "abnormal_x_regime",
+        "has_any_news_all",
+        "has_bad_news_all",
+    }
+
+    cols = []
+    for col in df.columns:
+        if col in exclude_exact:
+            continue
+        if not col.startswith("gdelt_"):
+            continue
+        cols.append(col)
+    return cols
+
+
+def filter_numeric_features(df: pd.DataFrame, feature_cols: List[str]) -> List[str]:
+    """
+    Keep numeric-ish columns with enough non-null coverage and non-zero variance.
+    """
+    selected: List[str] = []
+    n = len(df)
+
+    for col in feature_cols:
+        s = pd.to_numeric(df[col], errors="coerce")
+        non_null_ratio = float(s.notna().mean())
+        if non_null_ratio < MIN_NON_NULL_RATIO:
+            continue
+        if float(s.fillna(0.0).std(ddof=0)) == 0.0:
+            continue
+        selected.append(col)
+
+    if not selected:
+        raise ValueError("No usable news features after numeric filtering.")
+
+    return selected
+
+
+def select_top_features_by_target_corr(
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    target_col: str,
+    top_k: int,
+) -> List[str]:
+    """
+    Keep strongest features by absolute correlation with target.
+    """
+    corrs: List[Tuple[str, float]] = []
+    y = pd.to_numeric(df[target_col], errors="coerce")
+
+    for col in feature_cols:
+        x = pd.to_numeric(df[col], errors="coerce")
+        pair = pd.concat([x, y], axis=1).dropna()
+        if len(pair) < 50:
+            continue
+        corr = pair.iloc[:, 0].corr(pair.iloc[:, 1])
+        if pd.isna(corr):
+            continue
+        corrs.append((col, abs(float(corr))))
+
+    if not corrs:
+        raise ValueError("Failed to compute feature-target correlations.")
+
+    corrs.sort(key=lambda x: x[1], reverse=True)
+    return [name for name, _ in corrs[:top_k]]
+
+
+def drop_highly_correlated_features(
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    threshold: float,
+    target_col: str,
+) -> List[str]:
+    """
+    Greedy removal of highly collinear features.
+    Keep the one with stronger absolute correlation to target.
+    """
+    if len(feature_cols) <= 1:
+        return feature_cols
+
+    X = df[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    y = pd.to_numeric(df[target_col], errors="coerce").fillna(0.0)
+
+    target_corr = {}
+    for col in feature_cols:
+        corr = X[col].corr(y)
+        target_corr[col] = abs(float(corr)) if pd.notna(corr) else 0.0
+
+    corr_matrix = X.corr().abs()
+    keep = list(feature_cols)
+
+    for i, col_i in enumerate(feature_cols):
+        if col_i not in keep:
+            continue
+        for col_j in feature_cols[i + 1:]:
+            if col_j not in keep:
+                continue
+            cij = corr_matrix.loc[col_i, col_j]
+            if pd.isna(cij):
+                continue
+            if float(cij) >= threshold:
+                if target_corr[col_i] >= target_corr[col_j]:
+                    keep.remove(col_j)
+                else:
+                    keep.remove(col_i)
+                    break
+
+    return keep
+
+
+def time_series_cv(
+    X: pd.DataFrame,
+    y: pd.Series,
+    model: Pipeline,
+    n_splits: int,
+) -> Tuple[Dict[str, float], np.ndarray]:
+    """
+    TimeSeriesSplit CV with out-of-fold predictions.
+    """
     tscv = TimeSeriesSplit(n_splits=n_splits)
     maes, rmses, r2s = [], [], []
-    for train_idx, test_idx in tscv.split(X):
-        model.fit(X.iloc[train_idx], y.iloc[train_idx])
-        pred = model.predict(X.iloc[test_idx])
-        m = compute_metrics(y.iloc[test_idx].to_numpy(), pred)
+    oof_pred = np.full(len(y), np.nan, dtype=float)
+
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X), start=1):
+        X_train = X.iloc[train_idx]
+        y_train = y.iloc[train_idx]
+        X_test = X.iloc[test_idx]
+        y_test = y.iloc[test_idx]
+
+        model.fit(X_train, y_train)
+        pred = model.predict(X_test)
+
+        oof_pred[test_idx] = pred
+        m = compute_metrics(y_test.to_numpy(), pred)
         maes.append(m["MAE"])
         rmses.append(m["RMSE"])
         r2s.append(m["R2"])
-    return {
-        "cv_splits": n_splits,
-        "MAE_mean":  float(np.mean(maes)),
-        "RMSE_mean": float(np.mean(rmses)),
-        "R2_mean":   float(np.mean(r2s)),
-        "MAE_std":   float(np.std(maes)),
-        "RMSE_std":  float(np.std(rmses)),
-        "R2_std":    float(np.std(r2s)),
+
+        print(
+            f"  Fold {fold}: "
+            f"test_n={len(test_idx)}  "
+            f"MAE={m['MAE']:.6f}  RMSE={m['RMSE']:.6f}  R2={m['R2']:.6f}"
+        )
+
+    summary = {
+        "cv_splits": int(n_splits),
+        "MAE_mean": float(np.nanmean(maes)),
+        "RMSE_mean": float(np.nanmean(rmses)),
+        "R2_mean": float(np.nanmean(r2s)),
+        "MAE_std": float(np.nanstd(maes)),
+        "RMSE_std": float(np.nanstd(rmses)),
+        "R2_std": float(np.nanstd(r2s)),
     }
+    return summary, oof_pred
 
 
-def compute_media_effect(model: Pipeline, X: pd.DataFrame,
-                         news_cols: List[str]) -> np.ndarray:
-    """
-    Isolate the news-feature contribution to the Ridge prediction.
-    media_effect_usd = sum(beta_j * z_j) for j in news_cols only.
-    Units: same as TARGET_COL (USD).
-    """
+def make_pipeline(alpha: float) -> Pipeline:
+    return Pipeline([
+        ("scaler", StandardScaler()),
+        ("ridge", Ridge(alpha=alpha, random_state=42)),
+    ])
+
+
+def build_coefficients_table(
+    model: Pipeline,
+    feature_cols: List[str],
+) -> pd.DataFrame:
     scaler: StandardScaler = model.named_steps["scaler"]
-    reg:    Ridge           = model.named_steps["ridge"]
-    X_scaled  = scaler.transform(X)
-    col_names = list(X.columns)
-    news_idx  = [col_names.index(c) for c in news_cols if c in col_names]
-    if not news_idx:
-        return np.zeros(len(X), dtype=float)
-    return (X_scaled[:, news_idx] @ reg.coef_[news_idx]).astype(float)
+    ridge: Ridge = model.named_steps["ridge"]
+
+    # coefficients are already on scaled feature space
+    df_coef = pd.DataFrame({
+        "feature": feature_cols,
+        "coefficient_scaled": ridge.coef_,
+        "coefficient_abs": np.abs(ridge.coef_),
+        "feature_mean_before_scaling": scaler.mean_,
+        "feature_std_before_scaling": scaler.scale_,
+    }).sort_values("coefficient_abs", ascending=False).reset_index(drop=True)
+
+    return df_coef
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     print("\n" + "=" * 60)
-    print("STEP 07 — NEWS EFFECT MODEL (Ridge regression)")
+    print("STEP 07 — NEWS EFFECT MODEL (BMPI v2, abnormal returns)")
     print("=" * 60 + "\n")
 
     if not MODEL_DATASET.exists():
@@ -167,147 +328,152 @@ def main() -> None:
         )
 
     df = pd.read_parquet(MODEL_DATASET).copy()
+
     date_col = "date" if "date" in df.columns else "data"
     df["date"] = pd.to_datetime(df[date_col], errors="coerce").dt.normalize()
     df = df.dropna(subset=["date", TARGET_COL]).sort_values("date").reset_index(drop=True)
 
-    control_cols = pick_cols(df, CONTROL_COLS_CANDIDATES)
-    news_cols    = pick_cols(df, NEWS_COLS_CANDIDATES)
+    mcap_col = pick_first_existing(df, MCAP_COL_CANDIDATES)
+    if mcap_col is None:
+        raise ValueError("BTC market cap column not found in model dataset.")
 
-    if not news_cols:
-        raise ValueError("No GDELT news columns found. Check model_dataset_daily.")
+    df[mcap_col] = pd.to_numeric(df[mcap_col], errors="coerce")
+    df[TARGET_COL] = pd.to_numeric(df[TARGET_COL], errors="coerce")
 
-    # news-only features — controls already removed by SARIMAX in step04
-    feature_cols = news_cols
-    print(f"  Rows:              {len(df)}")
-    print(f"  Control features:  {len(control_cols)} (removed by step04 SARIMAX)")
-    print(f"  News features:     {len(news_cols)}")
-    print(f"  Ridge alpha:       {RIDGE_ALPHA}")
+    # -----------------------------------------------------------------------
+    # Feature selection
+    # -----------------------------------------------------------------------
+    news_feature_candidates = get_news_feature_candidates(df)
+    print(f"  Raw GDELT candidate features: {len(news_feature_candidates)}")
 
-    # Prepare features
-    for c in feature_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df[feature_cols] = df[feature_cols].fillna(0.0)
-    df[TARGET_COL]   = pd.to_numeric(df[TARGET_COL], errors="coerce")
+    usable_features = filter_numeric_features(df, news_feature_candidates)
+    print(f"  Usable numeric features:      {len(usable_features)}")
 
-    # Filter to rows where GDELT signal exists
-    mentions_col = next(
-        (c for c in ["gdelt_mentions_all"] if c in df.columns), None
+    top_features = select_top_features_by_target_corr(
+        df=df,
+        feature_cols=usable_features,
+        target_col=TARGET_COL,
+        top_k=TOP_K_BY_ABS_CORR,
     )
-    if mentions_col:
-        mask = df[mentions_col] > 0
-        n_before = len(df)
-        df = df[mask].reset_index(drop=True)
-        print(f"  Rows with GDELT:   {len(df)} / {n_before}")
+    print(f"  Top features by |corr|:       {len(top_features)}")
 
-    df = df.dropna(subset=[TARGET_COL]).reset_index(drop=True)
-    X = df[feature_cols]
-    y = df[TARGET_COL]
+    final_features = drop_highly_correlated_features(
+        df=df,
+        feature_cols=top_features,
+        threshold=MAX_ABS_CORR,
+        target_col=TARGET_COL,
+    )
+    print(f"  Final selected features:      {len(final_features)}")
+    print(f"  Ridge alpha:                  {RIDGE_ALPHA}")
 
-    # Build and cross-validate model
-    model = Pipeline([
-        ("scaler", StandardScaler()),
-        ("ridge",  Ridge(alpha=RIDGE_ALPHA, random_state=42)),
-    ])
+    if not final_features:
+        raise ValueError("No final features selected for step07.")
+
+    # Build model matrix
+    X = df[final_features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    y = df[TARGET_COL].copy()
+
+    # -----------------------------------------------------------------------
+    # Time-series CV
+    # -----------------------------------------------------------------------
+    model = make_pipeline(RIDGE_ALPHA)
+
     print("\n  Running TimeSeriesSplit CV...")
-    cv = time_series_cv(X, y, model, N_SPLITS)
-    print(f"  CV R²: {cv['R2_mean']:.4f} ± {cv['R2_std']:.4f}")
+    cv_summary, oof_pred = time_series_cv(X, y, model, N_SPLITS)
 
-    # Fit on full sample
+    valid_oof_mask = ~np.isnan(oof_pred)
+    if valid_oof_mask.sum() > 0:
+        oof_metrics = compute_metrics(y.to_numpy()[valid_oof_mask], oof_pred[valid_oof_mask])
+    else:
+        oof_metrics = {"MAE": np.nan, "RMSE": np.nan, "R2": np.nan}
+
+    print(
+        f"\n  OOF metrics: "
+        f"MAE={oof_metrics['MAE']:.6f}  "
+        f"RMSE={oof_metrics['RMSE']:.6f}  "
+        f"R2={oof_metrics['R2']:.6f}"
+    )
+
+    # -----------------------------------------------------------------------
+    # Fit full model
+    # -----------------------------------------------------------------------
     model.fit(X, y)
-    y_hat            = model.predict(X)
-    media_effect_usd = compute_media_effect(model, X, news_cols)
+    pred_full = model.predict(X)
 
-    in_sample = compute_metrics(y.to_numpy(), y_hat)  # in log space
-
-    tone_col = next((c for c in ["gdelt_tone_all"] if c in df.columns), None)
-
-    # Convert log-space media effect to USD
-    # media_effect_log * btc_mcap ≈ USD impact (first-order approximation)
-    mcap_col = next(
-        (c for c in ["btc_mcap", "btc_kapitalizacja_usd"] if c in df.columns), None
-    )
-    btc_mcap_arr = (
-        pd.to_numeric(df[mcap_col], errors="coerce").fillna(1.0).to_numpy()
-        if mcap_col else np.ones(len(df))
-    )
-    media_effect_usd_final = media_effect_usd * btc_mcap_arr
-
-    # Also get resid_btc_mcap_usd for step08 (already in USD from step04)
-    resid_usd_col = next(
-        (c for c in ["resid_btc_mcap_usd"] if c in df.columns), None
-    )
-    resid_usd_arr = (
-        pd.to_numeric(df[resid_usd_col], errors="coerce").fillna(0.0).to_numpy()
-        if resid_usd_col else np.zeros(len(df))
+    in_sample_metrics = compute_metrics(y.to_numpy(), pred_full)
+    print(
+        f"  In-sample: "
+        f"MAE={in_sample_metrics['MAE']:.6f}  "
+        f"RMSE={in_sample_metrics['RMSE']:.6f}  "
+        f"R2={in_sample_metrics['R2']:.6f}"
     )
 
-    out = pd.DataFrame({
-        "date":                 df["date"],
-        "data":                 df["date"],
-        "resid_log_btc_mcap":   y.to_numpy(dtype=float),
-        "resid_btc_mcap_usd":   resid_usd_arr,
-        "pred_resid_log":       y_hat.astype(float),
-        "media_effect_log":     media_effect_usd,
-        "media_effect_usd":     media_effect_usd_final,
-        "news_effect_usd":      media_effect_usd_final,
-        "abs_media_effect_usd": np.abs(media_effect_usd_final),
-        "gdelt_mentions_all":   df[mentions_col].to_numpy() if mentions_col else 0.0,
-        "gdelt_wzmianki_all":   df[mentions_col].to_numpy() if mentions_col else 0.0,
-        "gdelt_tone_all":       df[tone_col].to_numpy()     if tone_col     else 0.0,
-        "gdelt_ton_all":        df[tone_col].to_numpy()     if tone_col     else 0.0,
-    })
+    # -----------------------------------------------------------------------
+    # Outputs
+    # -----------------------------------------------------------------------
+    out = df.copy()
+    out["predicted_media_abnormal_logret"] = pred_full
+    out["predicted_media_effect_usd"] = (
+        out["predicted_media_abnormal_logret"] *
+        pd.to_numeric(out[mcap_col], errors="coerce").fillna(0.0)
+    )
+
+    out["bmip_v2_daily"] = out["predicted_media_effect_usd"]
+    out["bmip_v2_daily_abs"] = out["bmip_v2_daily"].abs()
+
+    # OOF predictions for honest validation downstream
+    out["predicted_media_abnormal_logret_oof"] = oof_pred
+    out["predicted_media_effect_usd_oof"] = (
+        out["predicted_media_abnormal_logret_oof"] *
+        pd.to_numeric(out[mcap_col], errors="coerce").fillna(0.0)
+    )
+
+    # Helpful ratios
+    if "abnormal_btc_mcap_usd" in out.columns:
+        denom = pd.to_numeric(out["abnormal_btc_mcap_usd"], errors="coerce").replace(0, np.nan).abs()
+        out["bmip_v2_share_of_abnormal_move"] = out["bmip_v2_daily_abs"] / denom
+
+    out["model_target"] = TARGET_COL
+    out["model_type"] = "Ridge_news_to_abnormal_returns"
+    out["model_alpha"] = RIDGE_ALPHA
+    out["n_selected_features"] = len(final_features)
+
+    out.to_csv(OUT_PREDICTIONS, index=False)
+
+    coef_df = build_coefficients_table(model, final_features)
+    coef_df.to_csv(OUT_COEFFICIENTS, index=False)
 
     summary = {
-        "rows":     int(len(out)),
-        "date_min": str(out["date"].min()),
-        "date_max": str(out["date"].max()),
-        "model": {
-            "type":              "Pipeline(StandardScaler + Ridge)",
-            "alpha":             RIDGE_ALPHA,
-            "features_total":    len(feature_cols),
-            "features_news":     len(news_cols),
-            "news_used":         news_cols,
-            "note": "Controls not included — SARIMAX in step04 already removes macro effects",
-        },
-        "fit_metrics_in_sample": in_sample,
-        "cv_metrics":            cv,
-        "media_effect_totals": {
-            "sum_media_effect_usd":      float(out["media_effect_usd"].sum()),
-            "sum_abs_media_effect_usd":  float(out["abs_media_effect_usd"].sum()),
-            "mean_media_effect_usd":     float(out["media_effect_usd"].mean()),
-            "mean_abs_media_effect_usd": float(out["abs_media_effect_usd"].mean()),
-            "max_abs_media_effect_usd":  float(out["abs_media_effect_usd"].max()),
-        },
+        "model_type": "Ridge_news_to_abnormal_returns",
+        "target": TARGET_COL,
+        "alpha": RIDGE_ALPHA,
+        "n_rows": int(len(out)),
+        "n_features_raw": int(len(news_feature_candidates)),
+        "n_features_usable": int(len(usable_features)),
+        "n_features_top_corr": int(len(top_features)),
+        "n_features_final": int(len(final_features)),
+        "selected_features": final_features,
+        "in_sample_metrics": in_sample_metrics,
+        "cv_summary": cv_summary,
+        "oof_metrics": oof_metrics,
+        "bmip_v2_daily_abs_sum_usd": float(out["bmip_v2_daily_abs"].sum()),
+        "bmip_v2_daily_sum_usd": float(out["bmip_v2_daily"].sum()),
+        "mean_abs_predicted_media_logret": float(np.abs(out["predicted_media_abnormal_logret"]).mean()),
+        "mean_abs_predicted_media_usd": float(out["bmip_v2_daily_abs"].mean()),
     }
 
-    DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
-    out.to_csv(OUT_PREDICTIONS, index=False)
     with open(OUT_SUMMARY, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
-    reg: Ridge = model.named_steps["ridge"]
-    coefs = pd.DataFrame({
-        "feature":     feature_cols,
-        "coef_scaled": reg.coef_.astype(float),
-        "is_news":     [1] * len(feature_cols),
-    }).sort_values("coef_scaled", key=lambda s: np.abs(s), ascending=False)
-    coefs.to_csv(OUT_COEFFICIENTS, index=False)
-
     print("\n" + "=" * 60)
-    print(f"  ✓  news_effect_daily.csv     : {len(out)} rows")
-    print(f"  ✓  news_effect_summary.json")
-    print(f"  ✓  news_effect_coefficients.csv")
-    print(f"\n  In-sample R²:             {in_sample['R2']:.4f}")
-    print(f"  CV R² (mean ± std):       {cv['R2_mean']:.4f} ± {cv['R2_std']:.4f}")
-    print(f"  SUM(media_effect_usd$):   ${summary['media_effect_totals']['sum_media_effect_usd']:>20,.0f}")
-    print(f"  SUM(|media_effect|):      ${summary['media_effect_totals']['sum_abs_media_effect_usd']:>20,.0f}")
-    print(f"  MAX(|media_effect|/day):  ${summary['media_effect_totals']['max_abs_media_effect_usd']:>20,.0f}")
-    print(f"\n  Note: per-day R²≈0.01 is expected — media explains ~1% of daily")
-    print(f"  residual noise. The paper's 26.2% is the window-level ratio")
-    print(f"  sum_abs(media)/sum_abs(resid) over ±30 day event windows.")
+    print("RESULT")
     print("=" * 60)
-    print("Next step: step08_event_level_impact.py\n")
+    print(f"  Saved predictions:   {OUT_PREDICTIONS}")
+    print(f"  Saved coefficients:  {OUT_COEFFICIENTS}")
+    print(f"  Saved summary:       {OUT_SUMMARY}")
+    print(f"  Final features used: {len(final_features)}")
+    print(f"  Mean OOF R2:         {cv_summary['R2_mean']:.6f}")
+    print("\nNext step: step08_event_level_impact.py")
 
 
 if __name__ == "__main__":
